@@ -23,7 +23,26 @@ sh MoFo_Example.sh
 ```
 Other hyperparameters can be seen in the Appendix of Paper.
 
-## 4. Citation
+## 4. MoFo++ Ablation Scripts
+
+We provide six ablation scripts that progressively add the two MoFo++ extensions (adaptive per-channel period estimation and channel attention). All scripts sweep over prediction horizons {96, 192, 336, 720}.
+
+| Script | Dataset | Adaptive Period | Channel Attention | Description |
+|---|---|---|---|---|
+| `run_fixed.sh` | ETTh1 | ✗ | ✗ | Ablation 1 — original MoFo with a fixed global period (`PERIODIC=24`) |
+| `run_fixed_weather.sh` | Weather | ✗ | ✗ | Ablation 1 — original MoFo on Weather (`PERIODIC=144`, 10-min intervals) |
+| `run_adaptive.sh` | ETTh1 | ✓ | ✗ | Ablation 2 — adaptive per-channel period, no channel attention |
+| `run_adaptive_weather.sh` | Weather | ✓ | ✗ | Ablation 2 — adaptive per-channel period on Weather |
+| `run_adaptive_cattn.sh` | ETTh1 | ✓ | ✓ | Ablation 3 — full MoFo++ (adaptive period + channel attention, `n_heads_channel=4`) |
+| `run_adaptive_cattn_weather.sh` | Weather | ✓ | ✓ | Ablation 3 — full MoFo++ on Weather |
+
+Run any script directly, e.g.:
+```bash
+sh run_adaptive_cattn.sh      # full MoFo++ on ETTh1
+sh run_adaptive_cattn_weather.sh  # full MoFo++ on Weather
+```
+
+## 5. Citation
 ```bibtex
 @inproceedings{ma2025mofo, 
   title     =  {MoFo: Empowering Long-term Time Series Forecasting with Periodic Pattern Modeling},
