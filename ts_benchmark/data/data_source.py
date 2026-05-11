@@ -149,7 +149,8 @@ class LocalDataSource(DataSource):
         :return: A time series in DataFrame format.
         """
         datafile_path = os.path.join(self.local_data_path, series_name)
-        data = read_data(datafile_path)
+        # data = read_data(datafile_path)
+        data = pd.read_csv(datafile_path)
         return data
 
 

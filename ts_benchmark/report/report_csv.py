@@ -48,7 +48,9 @@ def report(report_config: dict) -> None:
         if isinstance(log_files, pd.DataFrame)
         else load_record_data(log_files, drop_columns=ARTIFACT_COLUMNS)
     )
-
+    print(log_data.columns.tolist())
+    print(log_data.head())
+    print(log_data.isna().mean().sort_values(ascending=False))
     leaderboard_df = get_leaderboard(
         log_data,
         report_config["report_metrics"],

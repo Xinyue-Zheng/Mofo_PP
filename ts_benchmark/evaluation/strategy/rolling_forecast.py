@@ -242,7 +242,7 @@ class RollingForecast(ForecastingStrategy):
         if model.batch_forecast.__annotations__.get("not_implemented_batch"):
             return self._eval_sample(series, meta_info, model, series_name)
         else:
-            return self._eval_batch(series, meta_info, model, series_name)
+            return self._eval_batch(series, meta_info, model, series_name, model_factory)
 
     def _eval_sample(
         self,
@@ -250,6 +250,7 @@ class RollingForecast(ForecastingStrategy):
         meta_info: Optional[pd.Series],
         model: ModelBase,
         series_name: str,
+        model_factory: ModelFactory,
     ) -> List:
         """
         The sample execution pipeline of forecasting tasks.
@@ -348,6 +349,7 @@ class RollingForecast(ForecastingStrategy):
         meta_info: Optional[pd.Series],
         model: ModelBase,
         series_name: str,
+        model_factory: ModelFactory,
     ) -> List:
         """
         The batch execution pipeline of forecasting tasks.
@@ -359,6 +361,7 @@ class RollingForecast(ForecastingStrategy):
         :return: The evaluation results.
         """
         target_channel = self._get_scalar_config_value("target_channel", series_name)
+        
         stride = self._get_scalar_config_value("stride", series_name)
         horizon = self._get_scalar_config_value("horizon", series_name)
         num_rollings = self._get_scalar_config_value("num_rollings", series_name)
@@ -370,21 +373,30 @@ class RollingForecast(ForecastingStrategy):
 
         train_length, test_length = self._get_split_lens(series, meta_info, tv_ratio)
         train_valid_data, test_data = split_time(series, train_length)
-
+        train_valid_data["date"] = pd.to_datetime(train_valid_data["date"])
+        train_valid_data.set_index("date", inplace=True)
         target_train_valid_data, exog_train_valid_data = split_channel(
             train_valid_data, target_channel
         )
+        
+        
         target4batch, exog_data4batch = split_channel(series, target_channel)
+        
+        target4batch["date"] = pd.to_datetime(target4batch["date"])
+        target4batch.set_index("date", inplace=True)
         covariates_train, covariates4batch = {}, {}
         covariates_train["exog"] = exog_train_valid_data
         covariates4batch["exog"] = exog_data4batch
 
         start_fit_time = time.time()
+        # from ts_benchmark.baselines.time_series_library.adapters_for_MoFo import TransformerAdapter
         fit_method = model.forecast_fit if hasattr(model, "forecast_fit") else model.fit
+        # fit_method = TransformerAdapter.forecast_fit if hasattr(model, "forecast_fit") else model.fit
         fit_method(
-            target_train_valid_data,
+            train_valid_data = target_train_valid_data,
             covariates=covariates_train,
             train_ratio_in_tv=train_ratio_in_tv,
+            
         )
         end_fit_time = time.time()
 
@@ -393,6 +405,8 @@ class RollingForecast(ForecastingStrategy):
         index_list = self._get_index(train_length, test_length, horizon, stride)
         index_list = index_list[:num_rollings]
 
+        
+        
         batch_maker = RollingForecastEvalBatchMaker(
             target4batch,
             index_list,

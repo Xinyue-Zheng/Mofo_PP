@@ -36,7 +36,7 @@ class MoFo_Attention(nn.Module):
                                 nn.Linear(dim, dim)
                             )
 
-        self.cycle_in_rotation = nn.Parameter(torch.tensor(2 * torch.pi / cycle), 
+        self.cycle_in_rotation = nn.Parameter(torch.tensor(2 * math.pi / cycle), 
                                               requires_grad=False)
         self.cycle_pos = nn.Parameter(torch.arange(0, cycle).unsqueeze(0).unsqueeze(-1).unsqueeze(-1),
                                       requires_grad=False) # (1, 1, cycle)
@@ -120,6 +120,28 @@ class RMSNorm(nn.Module):
         return self.scale * x_normed
 
 
+# MoFo++: cross-channel attention module
+class ChannelAttention(nn.Module):
+    """Mixes information across channels after per-channel temporal processing.
+
+    Input/output shape: (B, C, d_model).
+    Uses multi-head self-attention with a residual + LayerNorm.
+    Compatible with PyTorch ≥ 1.8 (no batch_first kwarg required).
+    """
+
+    def __init__(self, d_model: int, n_heads: int = 4):
+        super().__init__()
+        # batch_first=True was added in PyTorch 1.9; permute manually for 1.8 compat
+        self.attn = nn.MultiheadAttention(d_model, n_heads)
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x):
+        # x: (B, C, d_model) → MultiheadAttention expects (C, B, d_model)
+        x_t = x.permute(1, 0, 2)          # (C, B, d_model)
+        out, _ = self.attn(x_t, x_t, x_t)
+        out = out.permute(1, 0, 2)         # (B, C, d_model)
+        return self.norm(x + out)
+
 
 class MoFo(nn.Module):
     """
@@ -177,21 +199,132 @@ class MoFo(nn.Module):
             MoFo_Backbone(self.dim, self.periodic, self.head) for _ in range(self.layers)
             ])
 
-        
-        
+        # ------------------------------------------------------------------ MoFo++
+        # 2.2  Channel-specific period-structured patching
+        # ------------------------------------------------------------------ MoFo++
+        self.use_adaptive_period = False
+        _ch_periods = getattr(configs, 'channel_periods', None)
+        if _ch_periods is not None and not all(p == self.periodic for p in _ch_periods):
+            self.use_adaptive_period = True  # MoFo++
+            self._ch_periods = list(_ch_periods)
+            _unique_p = sorted(set(self._ch_periods))
+
+            # Per-channel input projections (Unflatten + Linear, one per channel)
+            self._adapt_inputs = nn.ModuleList()  # MoFo++
+            self._adapt_pad = []   # python ints, not parameters
+            self._adapt_pnum = []
+            for _p in self._ch_periods:
+                _pn = math.ceil(self.seq_len / _p)
+                self._adapt_pad.append(self.seq_len % _p)
+                self._adapt_pnum.append(_pn)
+                self._adapt_inputs.append(nn.Sequential(
+                    nn.Unflatten(dim=-1, unflattened_size=(_p, _pn)),
+                    nn.Linear(_pn, self.dim),
+                ))
+
+            # One MoFo backbone per unique period value
+            self._adapt_backbones = nn.ModuleDict({  # MoFo++
+                str(_p): nn.Sequential(*[
+                    MoFo_Backbone(self.dim, _p, self.head)
+                    for _ in range(self.layers)
+                ])
+                for _p in _unique_p
+            })
+
+            # Shared output projection: mean-pooled D → pred_len
+            self._adapt_proj = nn.Linear(self.dim, self.pred_len)  # MoFo++
+
+        # ------------------------------------------------------------------ MoFo++
+        # 2.3  Channel-to-channel attention
+        # ------------------------------------------------------------------ MoFo++
+        self.use_channel_attn = bool(getattr(configs, 'channel_attn', False))
+        if self.use_channel_attn:
+            _n_heads_ch = int(getattr(configs, 'n_heads_channel', 4))
+            self.channel_attn_mod = ChannelAttention(self.dim, _n_heads_ch)  # MoFo++
+            # Projects mean-pooled backbone output to pred_len for the attn residual
+            self.chan_to_pred = nn.Linear(self.dim, self.pred_len)  # MoFo++
+
+
 
     def encoder(self, x, periodic_position, periodic_positionW):
-        x = self.norm(x, mode='norm').permute(0, 2, 1) # [Batch, Input length, Channel] -> [Batch*Channel, Input length
-        if self.padding_num:
-            x = torch.concat([x[..., self.padding_num:self.periodic], x], dim=-1)
-            
-        x = self.input(x) + self._ias(self.periodic, periodic_position)
+        x = self.norm(x, mode='norm').permute(0, 2, 1)  # [B, T, C] -> [B, C, T]
+        B, C, _ = x.shape
 
+        if self.use_adaptive_period:
+            # ---------------------------------------------------------- MoFo++
+            # 2.2  Per-channel period-specific patching + per-period backbone
+            # ---------------------------------------------------------- MoFo++
+            chan_embeds = []    # mean-pooled backbone output, one [B, D] per channel
+            chan_direct = []    # direct output projections, one [B, pred_len] per channel
+
+            for c in range(C):
+                x_c = x[:, c, :]           # [B, T]
+                _p   = self._ch_periods[c]
+                _pad = self._adapt_pad[c]
+
+                # Mirror original MoFo padding: prepend first-cycle tail to fill
+                if _pad:
+                    x_c = torch.cat([x_c[..., _pad:_p], x_c], dim=-1)  # [B, T']
+
+                x_c = self._adapt_inputs[c](x_c)  # [B, _p, D]
+
+                if self.if_bias:
+                    # bias: (1, C, 1, D) → pick channel c → (1, 1, D) broadcasts
+                    x_c = x_c + self.bias[0, c, 0, :].unsqueeze(0).unsqueeze(0)
+
+                x_c = self._adapt_backbones[str(_p)](x_c)  # [B, _p, D]
+
+                emb_c = x_c.mean(dim=1)                    # [B, D]
+                chan_embeds.append(emb_c)
+                chan_direct.append(self._adapt_proj(emb_c))  # [B, pred_len]
+
+            emb = torch.stack(chan_embeds, dim=1)  # [B, C, D]
+
+            if self.use_channel_attn:
+                # -------------------------------------------------------- MoFo++
+                # 2.3  Channel-to-channel attention (adaptive path)
+                # -------------------------------------------------------- MoFo++
+                emb_mixed = self.channel_attn_mod(emb)  # [B, C, D]
+                attn_outs = [
+                    self.chan_to_pred(emb_mixed[:, c, :]) for c in range(C)
+                ]  # list of [B, pred_len]
+                outs = [chan_direct[c] + attn_outs[c] for c in range(C)]
+            else:
+                outs = chan_direct
+
+            x_out = torch.stack(outs, dim=1)  # [B, C, pred_len]
+            x_out = self.norm(x_out.permute(0, 2, 1), mode='denorm')  # [B, pred_len, C]
+            return x_out
+
+        # ------------------------------------------------------------------
+        # Original MoFo path — unchanged when use_adaptive_period is False
+        # ------------------------------------------------------------------
+        if self.padding_num:
+            x = torch.cat([x[..., self.padding_num:self.periodic], x], dim=-1)
+
+        x = self.input(x) + self._ias(self.periodic, periodic_position)
         x = self.MoFo_Backbone(x.reshape(-1, self.periodic, self.dim))
-        x = self.output(x)
-        x = self.norm(x.reshape(-1, self.channels, self.pred_len).permute(0, 2, 1), 
-                           mode='denorm')
-        return x 
+
+        if self.use_channel_attn:
+            # ------------------------------------------------------------ MoFo++
+            # 2.3  Channel-to-channel attention (original-period path)
+            # ------------------------------------------------------------ MoFo++
+            emb = x.mean(dim=1).reshape(B, C, self.dim)   # [B, C, D]
+            emb_mixed = self.channel_attn_mod(emb)         # [B, C, D]
+            attn_out = self.chan_to_pred(
+                emb_mixed.reshape(B * C, self.dim)
+            )  # [B*C, pred_len]
+
+        x_out = self.output(x)  # [B*C, pred_len]
+
+        if self.use_channel_attn:
+            x_out = x_out + attn_out  # MoFo++: residual channel mixing
+
+        x_out = self.norm(
+            x_out.reshape(-1, self.channels, self.pred_len).permute(0, 2, 1),
+            mode='denorm',
+        )
+        return x_out
 
     def _ias(self, p, periodic_position, periodic_positionW=None):
         out = 0

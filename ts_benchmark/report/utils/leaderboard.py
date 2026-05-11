@@ -49,6 +49,7 @@ def _calculate_single_metric_result(
     :return: The leaderboard values for a single metric.
     """
     metric_df = full_metric_df.copy()
+    metric_df["model_name"] = 'Mofo'
     metric_df["model_and_params"] = (
         metric_df["model_name"] + ";" + metric_df["model_params"]
     )

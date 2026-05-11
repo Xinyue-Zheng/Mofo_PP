@@ -42,8 +42,16 @@ class SequentialBackend:
 
     def init(self) -> NoReturn:
         self.storage = SequentialSharedStorage()
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, self.gpu_devices))
-
+        # os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, self.gpu_devices))
+        if isinstance(self.gpu_devices, int):
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_devices)
+        elif isinstance(self.gpu_devices, (list, tuple)):
+            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, self.gpu_devices))
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_devices)
+        
+        
+        
     def schedule(self, fn: Callable, args: Tuple, timeout: float = -1) -> SequentialResult:
         if timeout != -1:
             warnings.warn("timeout is not supported by SequentialBackend, ignoring")

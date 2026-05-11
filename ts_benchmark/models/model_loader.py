@@ -108,7 +108,9 @@ def get_model_info(model_config: Dict) -> Union[Dict, Callable]:
     if adapter_name is not None:
         if adapter_name not in ADAPTER:
             raise ValueError(f"Unknown adapter {adapter_name}")
-        model_info = _import_attribute(ADAPTER[adapter_name])(model_info)
+        # model_info = _import_attribute(ADAPTER[adapter_name])(model_info)
+        adapter_fn = _import_attribute(ADAPTER[adapter_name])
+        model_info = adapter_fn(model_info)
 
     return model_info
 
@@ -176,6 +178,7 @@ class ModelFactory:
 
         :return: A model instance that is compatible with the :class:`ModelBase` interface.
         """
+    
         return self.model_factory(**self.model_hyper_params)
 
 
@@ -200,33 +203,34 @@ def get_models(all_model_config: Dict) -> List[ModelFactory]:
     """
     model_factory_list = []  # Store a list of model factories
     # Traverse each model configuration
-    for model_config in all_model_config["models"]:
-        model_info = get_model_info(model_config)  # Obtain model information
-        fallback_model_name = model_config["model_name"].split(".")[-1]
+    # for model_config in all_model_config["models"]:
+    model_config = all_model_config["models"]
+    model_info = get_model_info(model_config)  # Obtain model information
+    fallback_model_name = model_config["model_name"].split(".")[-1]
 
-        # Analyze model information
-        if isinstance(model_info, Dict):
-            model_factory = model_info.get("model_factory")
-            if model_factory is None:
-                raise ValueError("model_factory is none")
-            required_hyper_params = model_info.get("required_hyper_params", {})
-            model_name = model_info.get("model_name", fallback_model_name)
-        elif isinstance(model_info, Callable):
-            model_factory = model_info
-            required_hyper_params = {}
-            if hasattr(model_factory, "required_hyper_params"):
-                required_hyper_params = model_factory.required_hyper_params()
-            model_name = fallback_model_name
-        else:
-            raise ValueError(f"Unexpected model info type {type(model_info).__name__}")
+    # Analyze model information
+    if isinstance(model_info, Dict):
+        model_factory = model_info.get("model_factory")
+        if model_factory is None:
+            raise ValueError("model_factory is none")
+        required_hyper_params = model_info.get("required_hyper_params", {})
+        model_name = model_info.get("model_name", fallback_model_name)
+    elif isinstance(model_info, Callable):
+        model_factory = model_info
+        required_hyper_params = {}
+        if hasattr(model_factory, "required_hyper_params"):
+            required_hyper_params = model_factory.required_hyper_params()
+        model_name = fallback_model_name
+    else:
+        raise ValueError(f"Unexpected model info type {type(model_info).__name__}")
 
-        model_hyper_params = get_model_hyper_params(
-            all_model_config.get("recommend_model_hyper_params", {}),
-            required_hyper_params,
-            model_config,
-        )
-        # Add Model Factory to List
-        model_factory_list.append(
-            ModelFactory(model_name, model_factory, model_hyper_params)
-        )
+    model_hyper_params = get_model_hyper_params(
+        all_model_config.get("recommend_model_hyper_params", {}),
+        required_hyper_params,
+        model_config,
+    )
+    # Add Model Factory to List
+    model_factory_list.append(
+        ModelFactory(model_name, model_factory, model_hyper_params)
+    )
     return model_factory_list

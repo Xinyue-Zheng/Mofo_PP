@@ -60,29 +60,43 @@ def build_model_config(args: argparse.Namespace, config_data: Dict) -> Dict:
     else:
         args.adapter = [None] * len(args.model_name)
 
-    if args.model_hyper_params is not None:
-        args.model_hyper_params = [
-            None if item == "None" else item for item in args.model_hyper_params
-        ]
-        if len(args.model_name) > len(args.model_hyper_params):
-            args.model_hyper_params.extend(
-                [None] * (len(args.model_name) - len(args.model_hyper_params))
-            )
-    else:
-        args.model_hyper_params = [None] * len(args.model_name)
+    # Base defaults — identical to original MoFo behaviour
+    hyper_params = {
+        "batch_size": 16,
+        "d_model": 24,
+        "horizon": 96,
+        "lr": 0.01,
+        "norm": True,
+        "seq_len": 336,
+        "patience": 10,
+        "periodic": 24,
+        "bias": 1,
+        "cias": 1,
+    }
 
-    for adapter, model_name, model_hyper_params in zip(
-        args.adapter, args.model_name, args.model_hyper_params
-    ):
-        model_config["models"].append(
-            {
-                "adapter": adapter,
-                "model_name": model_name,
-                "model_hyper_params": json.loads(model_hyper_params)
-                if model_hyper_params is not None
-                else {},
-            }
-        )
+    # Merge user-supplied --model-hyper-params (JSON) on top of defaults
+    raw = args.model_hyper_params
+    if isinstance(raw, list):
+        raw = " ".join(raw)
+    if isinstance(raw, str):
+        try:
+            hyper_params.update(json.loads(raw))
+        except json.JSONDecodeError:
+            pass
+
+    # MoFo++: inject CLI flags into hyper-params
+    if getattr(args, 'adaptive_period', False):
+        hyper_params['adaptive_period'] = True
+    if getattr(args, 'channel_attn', False):
+        hyper_params['channel_attn'] = True
+    if getattr(args, 'n_heads_channel', None) is not None:
+        hyper_params['n_heads_channel'] = args.n_heads_channel
+
+    model_config["models"] = {
+        "model_hyper_params": hyper_params,
+        "adapter": "MoFo_adapter",
+        "model_name": "time_series_library.MoFo",
+    }
 
     return model_config
 
@@ -140,13 +154,16 @@ def init_worker(env: Dict) -> NoReturn:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="run_benchmark",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=
+        argparse.ArgumentDefaultsHelpFormatter,
     )
+    
+    
     # script name
     parser.add_argument(
         "--config-path",
         type=str,
-        required=True,
+        default="rolling_forecast_config.json",
         help="Evaluation config file path",
     )
 
@@ -154,7 +171,7 @@ if __name__ == "__main__":
         "--data-name-list",
         type=str,
         nargs="+",
-        default=None,
+        default=["dataset/weather.csv"],
         help="List of series names entered by the user",
     )
 
@@ -172,7 +189,7 @@ if __name__ == "__main__":
         "--adapter",
         type=str,
         nargs="+",
-        default=None,
+        default="MoFo_adapter",
         help="Adapter used to adapt the method to our pipeline",
     )
 
@@ -180,14 +197,14 @@ if __name__ == "__main__":
         "--model-name",
         type=str,
         nargs="+",
-        required=True,
+        default = "time_series_library.MoFo",
         help="The relative path of the model that needs to be evaluated",
     )
     parser.add_argument(
         "--model-hyper-params",
         type=str,
         nargs="+",
-        default=None,
+        default='{"batch_size": 16, "d_model": 24, "horizon": 96, "lr": 0.01, "norm": true, "seq_len": 336, "patience": 10, "periodic": 24, "bias": 1, "cias": 1}',
         help=(
             "The input parameters corresponding to the models to be evaluated "
             "should correspond one-to-one with the --model-name options."
@@ -205,7 +222,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--strategy-args",
         type=str,
-        default=None,
+        default='{"horizon": 96}',
         help="Parameters required for evaluating strategies",
     )
     parser.add_argument(
@@ -244,13 +261,13 @@ if __name__ == "__main__":
         "--gpus",
         type=int,
         nargs="+",
-        default=None,
+        default=0,
         help="List of gpu devices to use, only available in ray backends",
     )
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=os.cpu_count(),
+        default=1,
         help="Number of evaluation workers",
     )
     # TODO: should timeout be part of the configuration file?
@@ -288,7 +305,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--save-path",
         type=str,
-        default=None,
+        default="save_path_wheather",
         help="The relative path for saving evaluation results, relative to the result folder",
     )
 
@@ -298,6 +315,28 @@ if __name__ == "__main__":
         default=None,
         help="If true, saves the model's prediction results "
              "and the true values in evaluation result file",
+    )
+
+    # MoFo++ arguments
+    parser.add_argument(
+        "--adaptive-period",
+        action="store_true",
+        default=False,
+        help="[MoFo++] Estimate a channel-specific period via FFT instead of using a "
+             "fixed global period.",
+    )
+    parser.add_argument(
+        "--channel-attn",
+        action="store_true",
+        default=False,
+        help="[MoFo++] Add a cross-channel attention module after per-channel temporal "
+             "processing.",
+    )
+    parser.add_argument(
+        "--n-heads-channel",
+        type=int,
+        default=4,
+        help="[MoFo++] Number of attention heads in the cross-channel attention module.",
     )
 
     args = parser.parse_args()

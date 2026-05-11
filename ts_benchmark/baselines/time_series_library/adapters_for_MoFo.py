@@ -82,7 +82,11 @@ DEFAULT_HYPER_PARAMS = {
     "layer": 1,
     "expand": 4,
     "layers": 1,
-
+    # MoFo++ flags
+    "adaptive_period": False,   # 2.1/2.2: enable channel-specific period estimation
+    "channel_attn": False,      # 2.3: enable cross-channel attention
+    "n_heads_channel": 4,       # 2.3: heads for ChannelAttention
+    "channel_periods": None,    # set automatically when adaptive_period=True
 }
 
 
@@ -313,7 +317,12 @@ class TransformerAdapter(ModelBase):
         return self._model_name
 
     def multi_forecasting_hyper_param_tune(self, train_data: pd.DataFrame):
+        # train_data["date"] = pd.to_datetime(train_data["date"])
+        # train_data.set_index("date", inplace=True)
+        train_data = train_data[~train_data.index.duplicated(keep='first')]
+        train_data = train_data.asfreq("10min")
         freq = pd.infer_freq(train_data.index)
+        
         if freq == None:
             raise ValueError("Irregular time intervals")
         elif freq[0].lower() not in ["m", "w", "b", "d", "h", "t", "s"]:
@@ -454,10 +463,10 @@ class TransformerAdapter(ModelBase):
     def forecast_fit(
         self,
         train_valid_data: pd.DataFrame,
-        *,
+        # *,
         covariates: Optional[dict] = None,
         train_ratio_in_tv: float = 1.0,
-        **kwargs,
+        # **kwargs,
     ) -> "ModelBase":
         """
         Train the model.
@@ -482,6 +491,26 @@ class TransformerAdapter(ModelBase):
             self.multi_forecasting_hyper_param_tune(train_valid_data)
 
         setattr(self.config, "task_name", "short_term_forecast")
+
+        # MoFo++: channel-specific period estimation (2.1 / 2.2)
+        if getattr(self.config, 'adaptive_period', False):
+            from ts_benchmark.baselines.time_series_library.patchs.period_estimator import (
+                estimate_channel_periods,
+            )
+            T_slice = min(2000, len(train_valid_data))
+            train_slice = train_valid_data.iloc[:T_slice, :series_dim].values
+            channel_periods = estimate_channel_periods(
+                train_slice, default_period=self.config.periodic
+            )
+            # A period larger than seq_len means the model sees less than one
+            # full cycle, which breaks the Unflatten in the adaptive path.
+            seq_len = self.config.seq_len
+            channel_periods = [min(p, seq_len) for p in channel_periods]
+            self.config.channel_periods = channel_periods
+            print(f"[MoFo++] Estimated channel periods: {channel_periods}")
+        else:
+            self.config.channel_periods = None  # original behavior: uniform global period
+
         self.model = self.model_class(self.config)
 
         device_ids = np.arange(torch.cuda.device_count()).tolist()
